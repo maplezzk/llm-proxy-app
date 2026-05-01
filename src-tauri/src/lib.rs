@@ -392,19 +392,21 @@ pub fn run() {
                     }
 
                     if id == "toggle" {
-                        let process = app.state::<ProxyProcess>();
-                        let data = app.state::<AppData>();
-                        if data.running.load(Ordering::SeqCst) {
-                            stop_proxy(&process.0);
-                            std::thread::sleep(Duration::from_millis(500));
-                            rebuild_tray_menu(app);
-                        } else {
-                            let h = app.app_handle().clone();
-                            let child = start_proxy_binary(&h);
-                            *process.0.lock().unwrap() = child;
-                            std::thread::sleep(Duration::from_millis(1500));
-                            rebuild_tray_menu(app);
-                        }
+                        let h = app.app_handle().clone();
+                        let is_running = app.state::<AppData>().running.load(Ordering::SeqCst);
+                        std::thread::spawn(move || {
+                            let process = h.state::<ProxyProcess>();
+                            if is_running {
+                                stop_proxy(&process.0);
+                                std::thread::sleep(Duration::from_millis(800));
+                            } else {
+                                let child = start_proxy_binary(&h);
+                                *process.0.lock().unwrap() = child;
+                                std::thread::sleep(Duration::from_millis(2000));
+                            }
+                            let h2 = h.clone();
+                            h.run_on_main_thread(move || rebuild_tray_menu(&h2)).ok();
+                        });
                         return;
                     }
 
