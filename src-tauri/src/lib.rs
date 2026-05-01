@@ -398,11 +398,19 @@ pub fn run() {
                             let process = h.state::<ProxyProcess>();
                             if is_running {
                                 stop_proxy(&process.0);
-                                std::thread::sleep(Duration::from_millis(800));
+                                // Wait for port to close
+                                for _ in 0..10 {
+                                    std::thread::sleep(Duration::from_millis(200));
+                                    if !is_proxy_port_open() { break; }
+                                }
                             } else {
                                 let child = start_proxy_binary(&h);
                                 *process.0.lock().unwrap() = child;
-                                std::thread::sleep(Duration::from_millis(2000));
+                                // Wait for port to open
+                                for _ in 0..20 {
+                                    std::thread::sleep(Duration::from_millis(200));
+                                    if is_proxy_port_open() { break; }
+                                }
                             }
                             let h2 = h.clone();
                             h.run_on_main_thread(move || rebuild_tray_menu(&h2)).ok();
@@ -415,10 +423,16 @@ pub fn run() {
                         std::thread::spawn(move || {
                             let process = h.state::<ProxyProcess>();
                             stop_proxy(&process.0);
-                            std::thread::sleep(Duration::from_millis(500));
+                            for _ in 0..10 {
+                                std::thread::sleep(Duration::from_millis(200));
+                                if !is_proxy_port_open() { break; }
+                            }
                             let child = start_proxy_binary(&h);
                             *process.0.lock().unwrap() = child;
-                            std::thread::sleep(Duration::from_secs(2));
+                            for _ in 0..20 {
+                                std::thread::sleep(Duration::from_millis(200));
+                                if is_proxy_port_open() { break; }
+                            }
                             let h2 = h.clone();
                             h.run_on_main_thread(move || rebuild_tray_menu(&h2)).ok();
                         });
