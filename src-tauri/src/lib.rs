@@ -97,7 +97,7 @@ pub fn run() {
                 .tooltip("LLM Proxy")
                 .icon(app.default_window_icon().unwrap().clone())
                 .icon_as_template(true)
-                .menu_on_left_click(false)
+                .show_menu_on_left_click(false)
                 .on_menu_event(move |app, event| {
                     match event.id().as_ref() {
                         "open" => {
@@ -108,13 +108,13 @@ pub fn run() {
                             if is_proxy_running() {
                                 stop_proxy(&state.0);
                             } else {
-                                let handle = app.handle().clone();
+                                let handle = app.app_handle().clone();
                                 let child = start_proxy(&handle);
                                 *state.0.lock().unwrap() = child;
                             }
                             // Give the process a moment to start/stop
                             std::thread::sleep(std::time::Duration::from_millis(500));
-                            update_tray_menu(app);
+                            update_tray_menu(app.app_handle());
                         }
                         "quit" => {
                             let state = app.state::<ProxyProcess>();
@@ -131,23 +131,23 @@ pub fn run() {
                         ..
                     } = event
                     {
-                        let app = tray.app_handle();
+                        let _ = tray.app_handle();
                         let _ = open::that("http://127.0.0.1:9000/admin/");
                     }
                 })
                 .build(app)?;
 
-            update_tray_menu(app);
+            update_tray_menu(app.app_handle());
 
             // Auto-start proxy
-            let handle = app.handle().clone();
+            let handle = app.app_handle().clone();
             let child = start_proxy(&handle);
             let state = app.state::<ProxyProcess>();
             *state.0.lock().unwrap() = child;
 
             // Update menu after startup
             std::thread::sleep(std::time::Duration::from_millis(1000));
-            update_tray_menu(app);
+            update_tray_menu(app.app_handle());
 
             Ok(())
         })
