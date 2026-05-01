@@ -26,4 +26,9 @@ cd -
 cp "$LLM_PROXY_DIR/llm-proxy" "$OUT_DIR/llm-proxy-${TARGET}"
 chmod +x "$OUT_DIR/llm-proxy-${TARGET}"
 
+# Also link for dev mode
+ln -sf "$OUT_DIR/llm-proxy-${TARGET}" "$OUT_DIR/llm-proxy"
+mkdir -p src-tauri/target/debug/binaries
+ln -sf "$(pwd)/$OUT_DIR/llm-proxy-${TARGET}" src-tauri/target/debug/binaries/llm-proxy
+
 echo "Done: $OUT_DIR/llm-proxy-${TARGET}"

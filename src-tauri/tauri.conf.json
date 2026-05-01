@@ -5,7 +5,8 @@
   "identifier": "com.maplezzk.llm-proxy-app",
   "build": {
     "frontendDist": "../src",
-    "devUrl": "http://127.0.0.1:1420"
+    "devUrl": "http://127.0.0.1:1420",
+    "beforeDevCommand": "npx http-server ../src -p 1420 --silent -c-1"
   },
   "app": {
     "windows": [],
