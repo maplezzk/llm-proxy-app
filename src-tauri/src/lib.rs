@@ -31,6 +31,7 @@ fn start_proxy(app: &tauri::AppHandle) -> Option<Child> {
     log::info!("Starting llm-proxy: {:?}", path);
     Command::new(&path)
         .arg("start")
+        .current_dir(path.parent().unwrap())
         .spawn()
         .ok()
 }

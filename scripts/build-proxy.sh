@@ -26,6 +26,12 @@ cd -
 cp "$LLM_PROXY_DIR/llm-proxy" "$OUT_DIR/llm-proxy-${TARGET}"
 chmod +x "$OUT_DIR/llm-proxy-${TARGET}"
 
+# Copy admin UI files alongside binary
+cp "$LLM_PROXY_DIR/dist/api/admin-ui.html" "$OUT_DIR/admin-ui.html"
+cp "$LLM_PROXY_DIR/dist/api/admin-app.js" "$OUT_DIR/admin-app.js"
+cp "$OUT_DIR/admin-ui.html" src-tauri/target/debug/binaries/admin-ui.html 2>/dev/null || true
+cp "$OUT_DIR/admin-app.js" src-tauri/target/debug/binaries/admin-app.js 2>/dev/null || true
+
 # Also link for dev mode
 ln -sf "$OUT_DIR/llm-proxy-${TARGET}" "$OUT_DIR/llm-proxy"
 mkdir -p src-tauri/target/debug/binaries
