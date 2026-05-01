@@ -204,23 +204,27 @@ fn binary_name() -> &'static str {
 
 fn start_proxy_binary(app: &tauri::AppHandle) -> Option<Child> {
     let path = proxy_binary_path(app);
+    eprintln!("[app] start_proxy: {:?}", path);
     if !path.exists() {
-        log::warn!("Proxy binary not found: {:?}", path);
+        eprintln!("[app] binary NOT FOUND: {:?}", path);
         return None;
     }
-    log::info!("Starting llm-proxy: {:?}", path);
-    Command::new(&path)
-        .arg("start")
-        .current_dir(path.parent().unwrap())
-        .spawn()
-        .ok()
+    match Command::new(&path).arg("start").current_dir(path.parent().unwrap()).spawn() {
+        Ok(c) => { eprintln!("[app] proxy spawned PID={}", c.id()); Some(c) }
+        Err(e) => { eprintln!("[app] spawn FAILED: {}", e); None }
+    }
 }
 
 fn stop_proxy(process: &Mutex<Option<Child>>) {
-    if let Some(mut child) = process.lock().unwrap().take() {
-        log::info!("Stopping llm-proxy");
+    let mut guard = process.lock().unwrap();
+    if let Some(mut child) = guard.take() {
+        eprintln!("[app] killing child PID={}", child.id());
         let _ = child.kill();
+        eprintln!("[app] waiting for child...");
         let _ = child.wait();
+        eprintln!("[app] child stopped");
+    } else {
+        eprintln!("[app] no child process to stop");
     }
 }
 
@@ -394,24 +398,37 @@ pub fn run() {
                     if id == "toggle" {
                         let h = app.app_handle().clone();
                         let is_running = app.state::<AppData>().running.load(Ordering::SeqCst);
+                        eprintln!("[app] toggle clicked, running={}", is_running);
                         std::thread::spawn(move || {
                             let process = h.state::<ProxyProcess>();
                             if is_running {
                                 stop_proxy(&process.0);
-                                // Wait for port to close
-                                for _ in 0..10 {
+                                eprintln!("[app] waiting for port to close...");
+                                for i in 0..10 {
                                     std::thread::sleep(Duration::from_millis(200));
-                                    if !is_proxy_port_open() { break; }
+                                    let open = is_proxy_port_open();
+                                    eprintln!("[app]   port check {}: open={}", i, open);
+                                    if !open { break; }
                                 }
                             } else {
                                 let child = start_proxy_binary(&h);
                                 *process.0.lock().unwrap() = child;
-                                // Wait for port to open
-                                for _ in 0..20 {
+                                eprintln!("[app] waiting for port to open...");
+                                for i in 0..20 {
                                     std::thread::sleep(Duration::from_millis(200));
-                                    if is_proxy_port_open() { break; }
+                                    let open = is_proxy_port_open();
+                                    eprintln!("[app]   port check {}: open={}", i, open);
+                                    if open { break; }
                                 }
                             }
+                            eprintln!("[app] fetching data...");
+                            let data = h.state::<AppData>();
+                            if let Some(config) = fetch_config() {
+                                *data.providers.lock().unwrap() = config.providers;
+                            }
+                            *data.adapters.lock().unwrap() = fetch_adapters();
+                            *data.log_level.lock().unwrap() = fetch_log_level();
+                            eprintln!("[app] rebuilding menu...");
                             let h2 = h.clone();
                             h.run_on_main_thread(move || rebuild_tray_menu(&h2)).ok();
                         });
@@ -433,6 +450,11 @@ pub fn run() {
                                 std::thread::sleep(Duration::from_millis(200));
                                 if is_proxy_port_open() { break; }
                             }
+                            let data = h.state::<AppData>();
+                            if let Some(config) = fetch_config() {
+                                *data.providers.lock().unwrap() = config.providers;
+                            }
+                            *data.adapters.lock().unwrap() = fetch_adapters();
                             let h2 = h.clone();
                             h.run_on_main_thread(move || rebuild_tray_menu(&h2)).ok();
                         });
