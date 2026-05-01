@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
 use tauri::menu::{MenuBuilder, MenuItemBuilder, SubmenuBuilder};
-use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+use tauri::tray::TrayIconBuilder;
 use tauri::Manager;
 
 // ── API types ──
@@ -97,10 +97,21 @@ impl AppData {
     }
 }
 
-// ── HTTP helpers ──
+// ── Config ──
+
+fn proxy_port() -> u16 {
+    std::env::var("LLM_PROXY_PORT")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(9000)
+}
 
 fn api_base() -> String {
-    "http://127.0.0.1:9000".to_string()
+    format!("http://127.0.0.1:{}", proxy_port())
+}
+
+fn admin_url() -> String {
+    format!("http://127.0.0.1:{}/admin/", proxy_port())
 }
 
 fn get_json(path: &str) -> Option<serde_json::Value> {
@@ -112,10 +123,12 @@ fn get_json(path: &str) -> Option<serde_json::Value> {
     serde_json::from_str(body).ok()
 }
 
-fn fetch_health() -> bool {
-    get_json("/admin/health")
-        .and_then(|v| v["success"].as_bool())
-        .unwrap_or(false)
+fn is_proxy_port_open() -> bool {
+    std::net::TcpStream::connect_timeout(
+        &format!("127.0.0.1:{}", proxy_port()).parse().unwrap(),
+        Duration::from_secs(1),
+    )
+    .is_ok()
 }
 
 fn fetch_adapters() -> Vec<Adapter> {
@@ -225,7 +238,7 @@ fn stop_proxy(process: &Mutex<Option<Child>>) {
 
 fn rebuild_tray_menu(app: &tauri::AppHandle) {
     let data = app.state::<AppData>();
-    let running = fetch_health();
+    let running = is_proxy_port_open();
     data.running.store(running, Ordering::SeqCst);
 
     let tray = app.tray_by_id("main").unwrap();
@@ -390,13 +403,13 @@ pub fn run() {
                 .tooltip("LLM Proxy")
                 .icon(app.default_window_icon().unwrap().clone())
                 .icon_as_template(true)
-                .show_menu_on_left_click(false)
+                .show_menu_on_left_click(true)
                 .on_menu_event(|app, event| {
                     app.state::<AppData>().touch_menu();
                     let id = event.id().0.clone();
 
                     if id == "open" {
-                        let _ = open::that("http://127.0.0.1:9000/admin/");
+                        let _ = open::that(&admin_url());
                         return;
                     }
 
@@ -416,25 +429,30 @@ pub fn run() {
                         let data = app.state::<AppData>();
                         if data.running.load(Ordering::SeqCst) {
                             stop_proxy(&process.0);
+                            std::thread::sleep(Duration::from_millis(500));
+                            rebuild_tray_menu(app);
                         } else {
-                            let handle = app.app_handle().clone();
-                            let child = start_proxy_binary(&handle);
+                            let h = app.app_handle().clone();
+                            let child = start_proxy_binary(&h);
                             *process.0.lock().unwrap() = child;
+                            std::thread::sleep(Duration::from_millis(1500));
+                            rebuild_tray_menu(app);
                         }
-                        std::thread::sleep(Duration::from_millis(800));
-                        rebuild_tray_menu(app);
                         return;
                     }
 
                     if id == "restart" {
-                        let process = app.state::<ProxyProcess>();
-                        stop_proxy(&process.0);
-                        std::thread::sleep(Duration::from_millis(500));
-                        let handle = app.app_handle().clone();
-                        let child = start_proxy_binary(&handle);
-                        *process.0.lock().unwrap() = child;
-                        std::thread::sleep(Duration::from_secs(2));
-                        rebuild_tray_menu(app);
+                        let h = app.app_handle().clone();
+                        std::thread::spawn(move || {
+                            let process = h.state::<ProxyProcess>();
+                            stop_proxy(&process.0);
+                            std::thread::sleep(Duration::from_millis(500));
+                            let child = start_proxy_binary(&h);
+                            *process.0.lock().unwrap() = child;
+                            std::thread::sleep(Duration::from_secs(2));
+                            let h2 = h.clone();
+                            h.run_on_main_thread(move || rebuild_tray_menu(&h2)).ok();
+                        });
                         return;
                     }
 
@@ -492,16 +510,7 @@ pub fn run() {
                         app.exit(0);
                     }
                 })
-                .on_tray_icon_event(|_tray, event| {
-                    if let TrayIconEvent::Click {
-                        button: MouseButton::Left,
-                        button_state: MouseButtonState::Up,
-                        ..
-                    } = event
-                    {
-                        let _ = open::that("http://127.0.0.1:9000/admin/");
-                    }
-                })
+
                 .build(app)?;
 
             // Initial data fetch & menu
