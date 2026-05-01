@@ -8,7 +8,7 @@ use tauri::Manager;
 
 // ── API types ──
 
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
 struct AdapterModel {
     #[serde(rename = "sourceModelId")]
     source_model_id: String,
@@ -18,7 +18,7 @@ struct AdapterModel {
     status: Option<String>,
 }
 
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
 struct Adapter {
     name: String,
     #[serde(rename = "type")]
@@ -29,12 +29,12 @@ struct Adapter {
     models: Vec<AdapterModel>,
 }
 
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
 struct ProviderModel {
     id: String,
 }
 
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
 struct Provider {
     name: String,
     #[serde(rename = "type")]
@@ -74,6 +74,7 @@ struct AppData {
     providers: Mutex<Vec<Provider>>,
     log_level: Mutex<String>,
     running: AtomicBool,
+    last_menu_action: Mutex<std::time::Instant>,
 }
 
 impl AppData {
@@ -83,7 +84,16 @@ impl AppData {
             providers: Mutex::new(Vec::new()),
             log_level: Mutex::new("info".to_string()),
             running: AtomicBool::new(false),
+            last_menu_action: Mutex::new(std::time::Instant::now()),
         }
+    }
+
+    fn touch_menu(&self) {
+        *self.last_menu_action.lock().unwrap() = std::time::Instant::now();
+    }
+
+    fn can_rebuild_menu(&self) -> bool {
+        self.last_menu_action.lock().unwrap().elapsed() > Duration::from_secs(3)
     }
 }
 
@@ -328,19 +338,40 @@ fn start_polling(app: tauri::AppHandle) {
                 continue;
             }
 
-            // Refresh data from API
-            if let Some(config) = fetch_config() {
-                *data.providers.lock().unwrap() = config.providers;
-            }
-            *data.adapters.lock().unwrap() = fetch_adapters();
-            *data.log_level.lock().unwrap() = fetch_log_level();
+            // Refresh data from API, only rebuild menu if something changed
+            let new_level = fetch_log_level();
+            let new_adapters = fetch_adapters();
+            let new_config = fetch_config();
 
-            // Rebuild menu on main thread
-            let a = app.clone();
-            let b = a.clone();
-            a.run_on_main_thread(move || {
-                rebuild_tray_menu(&b);
-            }).ok();
+            let level_changed = {
+                let old = data.log_level.lock().unwrap();
+                *old != new_level
+            };
+            let adapters_changed = {
+                let old = data.adapters.lock().unwrap();
+                // Compare by serializing to JSON
+                serde_json::to_string(&*old).unwrap_or_default()
+                    != serde_json::to_string(&new_adapters).unwrap_or_default()
+            };
+            let providers_changed = {
+                let old = data.providers.lock().unwrap();
+                serde_json::to_string(&*old).unwrap_or_default()
+                    != serde_json::to_string(&new_config.as_ref().map(|c| &c.providers)).unwrap_or_default()
+            };
+
+            if (level_changed || adapters_changed || providers_changed) && data.can_rebuild_menu() {
+                if let Some(config) = new_config {
+                    *data.providers.lock().unwrap() = config.providers;
+                }
+                *data.adapters.lock().unwrap() = new_adapters;
+                *data.log_level.lock().unwrap() = new_level;
+
+                let a = app.clone();
+                let b = a.clone();
+                a.run_on_main_thread(move || {
+                    rebuild_tray_menu(&b);
+                }).ok();
+            }
         }
     });
 }
@@ -361,6 +392,7 @@ pub fn run() {
                 .icon_as_template(true)
                 .show_menu_on_left_click(false)
                 .on_menu_event(|app, event| {
+                    app.state::<AppData>().touch_menu();
                     let id = event.id().0.clone();
 
                     if id == "open" {
