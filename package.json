@@ -1,0 +1,14 @@
+{
+  "name": "llm-proxy-app",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Cross-platform system tray app for llm-proxy",
+  "scripts": {
+    "dev": "tauri dev",
+    "build": "tauri build",
+    "build:proxy": "./scripts/build-proxy.sh"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.0.0"
+  }
+}
