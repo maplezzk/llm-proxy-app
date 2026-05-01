@@ -245,9 +245,9 @@ fn rebuild_tray_menu(app: &tauri::AppHandle) {
 
     // Header: status
     let status_text = if running {
-        "🟢 llm-proxy 运行中"
+        "●  llm-proxy 运行中"
     } else {
-        "🔴 llm-proxy 未运行"
+        "○  llm-proxy 未运行"
     };
     let status = MenuItemBuilder::with_id("status", status_text)
         .enabled(false)
@@ -280,7 +280,7 @@ fn rebuild_tray_menu(app: &tauri::AppHandle) {
     } else {
         for adapter in adapters.iter() {
             // Adapter name as disabled header
-            let header = MenuItemBuilder::with_id("noop", &format!("📦 {}", adapter.name))
+            let header = MenuItemBuilder::with_id("noop", &adapter.name)
                 .enabled(false)
                 .build(app)
                 .unwrap();
@@ -317,7 +317,7 @@ fn rebuild_tray_menu(app: &tauri::AppHandle) {
     menu_builder = menu_builder.separator();
 
     // Refresh
-    let refresh = MenuItemBuilder::with_id("refresh", "🔄 刷新").build(app).unwrap();
+    let refresh = MenuItemBuilder::with_id("refresh", "刷新").build(app).unwrap();
 
     // Log level submenu
     let log_level_val = data.log_level.lock().unwrap().clone();
