@@ -279,10 +279,16 @@ fn rebuild_tray_menu(app: &tauri::AppHandle) {
         menu_builder = menu_builder.item(&no_conn);
     } else {
         for adapter in adapters.iter() {
-            let mut submenu = SubmenuBuilder::new(app, &adapter.name);
+            // Adapter name as disabled header
+            let header = MenuItemBuilder::with_id("noop", &adapter.name)
+                .enabled(false)
+                .build(app)
+                .unwrap();
+            menu_builder = menu_builder.item(&header);
 
             for mapping in &adapter.models {
-                let mut model_sub = SubmenuBuilder::new(app, &format!("  {}", mapping.source_model_id));
+                // Each sourceModelId gets a flat submenu of provider/model options
+                let mut sub = SubmenuBuilder::new(app, &format!("  {}", mapping.source_model_id));
 
                 for provider in providers.iter() {
                     for model in &provider.models {
@@ -292,18 +298,19 @@ fn rebuild_tray_menu(app: &tauri::AppHandle) {
                             "switch:{}:{}:{}:{}",
                             adapter.name, mapping.source_model_id, provider.name, model.id
                         );
-
-                        let item = MenuItemBuilder::with_id(&id, if checked { format!("✓ {}", label) } else { format!("  {}", label) })
-                            .build(app)
-                            .unwrap();
-                        model_sub = model_sub.item(&item);
+                        let item = MenuItemBuilder::with_id(
+                            &id,
+                            if checked { format!("✓ {}", label) } else { format!("  {}", label) },
+                        )
+                        .build(app)
+                        .unwrap();
+                        sub = sub.item(&item);
                     }
-                    model_sub = model_sub.separator();
+                    sub = sub.separator();
                 }
-                submenu = submenu.item(&model_sub.build().unwrap());
+                menu_builder = menu_builder.item(&sub.build().unwrap());
             }
-
-            menu_builder = menu_builder.item(&submenu.build().unwrap());
+            menu_builder = menu_builder.separator();
         }
     }
 
