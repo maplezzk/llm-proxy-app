@@ -1,14 +1,181 @@
 use std::process::{Child, Command};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
-use tauri::menu::{MenuBuilder, MenuItemBuilder};
+use std::time::Duration;
+use tauri::menu::{MenuBuilder, MenuItemBuilder, SubmenuBuilder};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::Manager;
 
+// ── API types ──
+
+#[derive(Debug, serde::Deserialize)]
+struct AdapterModel {
+    #[serde(rename = "sourceModelId")]
+    source_model_id: String,
+    provider: String,
+    #[serde(rename = "targetModelId")]
+    target_model_id: String,
+    status: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct Adapter {
+    name: String,
+    #[serde(rename = "type")]
+    adapter_type: String,
+    #[serde(rename = "baseUrl")]
+    #[allow(dead_code)]
+    base_url: Option<String>,
+    models: Vec<AdapterModel>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct ProviderModel {
+    id: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct Provider {
+    name: String,
+    #[serde(rename = "type")]
+    #[allow(dead_code)]
+    provider_type: String,
+    models: Vec<ProviderModel>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct ConfigData {
+    providers: Vec<Provider>,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct UpdateModelMapping {
+    #[serde(rename = "sourceModelId")]
+    source_model_id: String,
+    provider: String,
+    #[serde(rename = "targetModelId")]
+    target_model_id: String,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct UpdateAdapterBody {
+    name: String,
+    #[serde(rename = "type")]
+    adapter_type: String,
+    models: Vec<UpdateModelMapping>,
+}
+
+// ── App state ──
+
 struct ProxyProcess(Mutex<Option<Child>>);
 
+struct AppData {
+    adapters: Mutex<Vec<Adapter>>,
+    providers: Mutex<Vec<Provider>>,
+    log_level: Mutex<String>,
+    running: AtomicBool,
+}
+
+impl AppData {
+    fn new() -> Self {
+        Self {
+            adapters: Mutex::new(Vec::new()),
+            providers: Mutex::new(Vec::new()),
+            log_level: Mutex::new("info".to_string()),
+            running: AtomicBool::new(false),
+        }
+    }
+}
+
+// ── HTTP helpers ──
+
+fn api_base() -> String {
+    "http://127.0.0.1:9000".to_string()
+}
+
+fn get_json(path: &str) -> Option<serde_json::Value> {
+    let resp = minreq::get(&format!("{}{}", api_base(), path))
+        .with_header("Accept", "application/json")
+        .send()
+        .ok()?;
+    let body = resp.as_str().ok()?;
+    serde_json::from_str(body).ok()
+}
+
+fn fetch_health() -> bool {
+    get_json("/admin/health")
+        .and_then(|v| v["success"].as_bool())
+        .unwrap_or(false)
+}
+
+fn fetch_adapters() -> Vec<Adapter> {
+    get_json("/admin/adapters")
+        .and_then(|v| {
+            v["data"]["adapters"]
+                .as_array()
+                .map(|arr| arr.iter().filter_map(|a| serde_json::from_value::<Adapter>(a.clone()).ok()).collect())
+        })
+        .unwrap_or_default()
+}
+
+fn fetch_config() -> Option<ConfigData> {
+    get_json("/admin/config").and_then(|v| {
+        v["data"].as_object().map(|data| ConfigData {
+            providers: data["providers"]
+                .as_array()
+                .map(|arr| arr.iter().filter_map(|p| serde_json::from_value::<Provider>(p.clone()).ok()).collect())
+                .unwrap_or_default(),
+        })
+    })
+}
+
+fn fetch_log_level() -> String {
+    get_json("/admin/log-level")
+        .and_then(|v| v["data"]["level"].as_str().map(|s| s.to_string()))
+        .unwrap_or_else(|| "info".to_string())
+}
+
+fn put_log_level(level: &str) -> bool {
+    minreq::put(&format!("{}/admin/log-level", api_base()))
+        .with_header("Content-Type", "application/json")
+        .with_body(serde_json::json!({ "level": level }).to_string())
+        .send()
+        .map(|r| r.status_code == 200)
+        .unwrap_or(false)
+}
+
+fn put_adapter(name: &str, adapter_type: &str, models: &[AdapterModel]) -> bool {
+    let mappings: Vec<UpdateModelMapping> = models
+        .iter()
+        .map(|m| UpdateModelMapping {
+            source_model_id: m.source_model_id.clone(),
+            provider: m.provider.clone(),
+            target_model_id: m.target_model_id.clone(),
+        })
+        .collect();
+
+    let body = UpdateAdapterBody {
+        name: name.to_string(),
+        adapter_type: adapter_type.to_string(),
+        models: mappings,
+    };
+
+    minreq::put(&format!("{}/admin/adapters/{}", api_base(), name))
+        .with_header("Content-Type", "application/json")
+        .with_body(serde_json::to_string(&body).unwrap_or_default())
+        .send()
+        .map(|r| r.status_code == 200)
+        .unwrap_or(false)
+}
+
+// ── Binary management ──
+
 fn proxy_binary_path(app: &tauri::AppHandle) -> std::path::PathBuf {
-    let resource_dir = app.path().resource_dir().unwrap();
-    resource_dir.join("binaries").join(binary_name())
+    app.path()
+        .resource_dir()
+        .unwrap()
+        .join("binaries")
+        .join(binary_name())
 }
 
 fn binary_name() -> &'static str {
@@ -22,7 +189,7 @@ fn binary_name() -> &'static str {
     }
 }
 
-fn start_proxy(app: &tauri::AppHandle) -> Option<Child> {
+fn start_proxy_binary(app: &tauri::AppHandle) -> Option<Child> {
     let path = proxy_binary_path(app);
     if !path.exists() {
         log::warn!("Proxy binary not found: {:?}", path);
@@ -44,54 +211,148 @@ fn stop_proxy(process: &Mutex<Option<Child>>) {
     }
 }
 
-fn is_proxy_running() -> bool {
-    // Simple health check on default port
-    std::net::TcpStream::connect("127.0.0.1:9000").is_ok()
-}
+// ── Menu building ──
 
-fn update_tray_menu(app: &tauri::AppHandle) {
-    let running = is_proxy_running();
+fn rebuild_tray_menu(app: &tauri::AppHandle) {
+    let data = app.state::<AppData>();
+    let running = fetch_health();
+    data.running.store(running, Ordering::SeqCst);
+
     let tray = app.tray_by_id("main").unwrap();
 
+    // Header: status
     let status_text = if running {
-        "🟢 Proxy Running"
+        "●  llm-proxy 运行中"
     } else {
-        "🔴 Proxy Stopped"
+        "○  llm-proxy 未运行"
     };
-    let toggle_text = if running {
-        "Stop Proxy"
-    } else {
-        "Start Proxy"
-    };
-
     let status = MenuItemBuilder::with_id("status", status_text)
         .enabled(false)
         .build(app)
         .unwrap();
-    let open_admin = MenuItemBuilder::with_id("open", "Open Admin UI")
+
+    // Service control
+    let toggle_text = if running { "⏹  停止服务" } else { "▶  启动服务" };
+    let toggle = MenuItemBuilder::with_id("toggle", toggle_text).build(app).unwrap();
+
+    let restart = MenuItemBuilder::with_id("restart", "↺  重启服务")
         .enabled(running)
         .build(app)
         .unwrap();
-    let toggle = MenuItemBuilder::with_id("toggle", toggle_text)
+
+    // Build adapter submenus
+    let adapters = data.adapters.lock().unwrap();
+    let providers = data.providers.lock().unwrap();
+
+    let mut menu_builder = MenuBuilder::new(app);
+    menu_builder = menu_builder.items(&[&status, &toggle, &restart]);
+    menu_builder = menu_builder.separator();
+
+    if adapters.is_empty() {
+        let no_conn = MenuItemBuilder::with_id("no_conn", "无法连接到 llm-proxy")
+            .enabled(false)
+            .build(app)
+            .unwrap();
+        menu_builder = menu_builder.item(&no_conn);
+    } else {
+        for adapter in adapters.iter() {
+            let mut submenu = SubmenuBuilder::new(app, &adapter.name);
+
+            for mapping in &adapter.models {
+                let mut model_sub = SubmenuBuilder::new(app, &format!("  {}", mapping.source_model_id));
+
+                for provider in providers.iter() {
+                    for model in &provider.models {
+                        let label = format!("{}/{}", provider.name, model.id);
+                        let checked = provider.name == mapping.provider && model.id == mapping.target_model_id;
+                        let id = format!(
+                            "switch:{}:{}:{}:{}",
+                            adapter.name, mapping.source_model_id, provider.name, model.id
+                        );
+
+                        let item = MenuItemBuilder::with_id(&id, if checked { format!("✓ {}", label) } else { format!("  {}", label) })
+                            .build(app)
+                            .unwrap();
+                        model_sub = model_sub.item(&item);
+                    }
+                    model_sub = model_sub.separator();
+                }
+                submenu = submenu.item(&model_sub.build().unwrap());
+            }
+
+            menu_builder = menu_builder.item(&submenu.build().unwrap());
+        }
+    }
+
+    menu_builder = menu_builder.separator();
+
+    // Refresh
+    let refresh = MenuItemBuilder::with_id("refresh", "刷新").build(app).unwrap();
+
+    // Log level submenu
+    let log_level_val = data.log_level.lock().unwrap().clone();
+    let mut log_sub = SubmenuBuilder::new(app, &format!("日志级别: {}", log_level_val));
+    for level in &["debug", "info", "warn", "error"] {
+        let checked = *level == log_level_val;
+        let item = MenuItemBuilder::with_id(
+            &format!("loglevel:{}", level),
+            if checked { format!("✓ {}", level) } else { format!("  {}", level) },
+        )
         .build(app)
         .unwrap();
-    let quit = MenuItemBuilder::with_id("quit", "Quit")
-        .build(app)
-        .unwrap();
+        log_sub = log_sub.item(&item);
+    }
 
-    let menu = MenuBuilder::new(app)
-        .items(&[&status, &open_admin, &toggle, &quit])
-        .build()
-        .unwrap();
+    // Open Admin
+    let admin = MenuItemBuilder::with_id("open", "打开 Admin UI").build(app).unwrap();
 
-    tray.set_menu(Some(menu)).unwrap();
+    menu_builder = menu_builder.items(&[&refresh, &log_sub.build().unwrap(), &admin]);
+    menu_builder = menu_builder.separator();
+
+    let quit = MenuItemBuilder::with_id("quit", "退出").build(app).unwrap();
+    menu_builder = menu_builder.item(&quit);
+
+    tray.set_menu(Some(menu_builder.build().unwrap())).unwrap();
 }
+
+// ── Background polling ──
+
+fn start_polling(app: tauri::AppHandle) {
+    std::thread::spawn(move || {
+        loop {
+            std::thread::sleep(Duration::from_secs(5));
+
+            // Only poll if proxy is running
+            let data = app.state::<AppData>();
+            if !data.running.load(Ordering::SeqCst) {
+                continue;
+            }
+
+            // Refresh data from API
+            if let Some(config) = fetch_config() {
+                *data.providers.lock().unwrap() = config.providers;
+            }
+            *data.adapters.lock().unwrap() = fetch_adapters();
+            *data.log_level.lock().unwrap() = fetch_log_level();
+
+            // Rebuild menu on main thread
+            let a = app.clone();
+            let b = a.clone();
+            a.run_on_main_thread(move || {
+                rebuild_tray_menu(&b);
+            }).ok();
+        }
+    });
+}
+
+// ── Main ──
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .manage(ProxyProcess(Mutex::new(None)))
+        .manage(AppData::new())
         .setup(|app| {
             // Create tray
             let _tray = TrayIconBuilder::with_id("main")
@@ -99,56 +360,139 @@ pub fn run() {
                 .icon(app.default_window_icon().unwrap().clone())
                 .icon_as_template(true)
                 .show_menu_on_left_click(false)
-                .on_menu_event(move |app, event| {
-                    match event.id().as_ref() {
-                        "open" => {
-                            let _ = open::that("http://127.0.0.1:9000/admin/");
+                .on_menu_event(|app, event| {
+                    let id = event.id().0.clone();
+
+                    if id == "open" {
+                        let _ = open::that("http://127.0.0.1:9000/admin/");
+                        return;
+                    }
+
+                    if id == "refresh" {
+                        let data = app.state::<AppData>();
+                        if let Some(config) = fetch_config() {
+                            *data.providers.lock().unwrap() = config.providers;
                         }
-                        "toggle" => {
-                            let state = app.state::<ProxyProcess>();
-                            if is_proxy_running() {
-                                stop_proxy(&state.0);
-                            } else {
-                                let handle = app.app_handle().clone();
-                                let child = start_proxy(&handle);
-                                *state.0.lock().unwrap() = child;
+                        *data.adapters.lock().unwrap() = fetch_adapters();
+                        *data.log_level.lock().unwrap() = fetch_log_level();
+                        rebuild_tray_menu(app);
+                        return;
+                    }
+
+                    if id == "toggle" {
+                        let process = app.state::<ProxyProcess>();
+                        let data = app.state::<AppData>();
+                        if data.running.load(Ordering::SeqCst) {
+                            stop_proxy(&process.0);
+                        } else {
+                            let handle = app.app_handle().clone();
+                            let child = start_proxy_binary(&handle);
+                            *process.0.lock().unwrap() = child;
+                        }
+                        std::thread::sleep(Duration::from_millis(800));
+                        rebuild_tray_menu(app);
+                        return;
+                    }
+
+                    if id == "restart" {
+                        let process = app.state::<ProxyProcess>();
+                        stop_proxy(&process.0);
+                        std::thread::sleep(Duration::from_millis(500));
+                        let handle = app.app_handle().clone();
+                        let child = start_proxy_binary(&handle);
+                        *process.0.lock().unwrap() = child;
+                        std::thread::sleep(Duration::from_secs(2));
+                        rebuild_tray_menu(app);
+                        return;
+                    }
+
+                    if id.starts_with("loglevel:") {
+                        let level = id.strip_prefix("loglevel:").unwrap();
+                        put_log_level(level);
+                        let data = app.state::<AppData>();
+                        *data.log_level.lock().unwrap() = level.to_string();
+                        rebuild_tray_menu(app);
+                        return;
+                    }
+
+                    if id.starts_with("switch:") {
+                        let parts: Vec<&str> = id.splitn(5, ':').collect();
+                        if parts.len() == 5 {
+                            let adapter_name = parts[1];
+                            let source_model = parts[2];
+                            let new_provider = parts[3];
+                            let new_target = parts[4];
+
+                            let data = app.state::<AppData>();
+                            let adapters = data.adapters.lock().unwrap();
+                            if let Some(adapter) = adapters.iter().find(|a| a.name == adapter_name) {
+                                let updated_models: Vec<AdapterModel> = adapter
+                                    .models
+                                    .iter()
+                                    .map(|m| {
+                                        let mut model = AdapterModel {
+                                            source_model_id: m.source_model_id.clone(),
+                                            provider: m.provider.clone(),
+                                            target_model_id: m.target_model_id.clone(),
+                                            status: m.status.clone(),
+                                        };
+                                        if m.source_model_id == source_model {
+                                            model.provider = new_provider.to_string();
+                                            model.target_model_id = new_target.to_string();
+                                        }
+                                        model
+                                    })
+                                    .collect();
+
+                                put_adapter(adapter_name, &adapter.adapter_type, &updated_models);
+                                std::thread::sleep(Duration::from_millis(300));
+                                let new_adapters = fetch_adapters();
+                                *data.adapters.lock().unwrap() = new_adapters;
                             }
-                            // Give the process a moment to start/stop
-                            std::thread::sleep(std::time::Duration::from_millis(500));
-                            update_tray_menu(app.app_handle());
+                            rebuild_tray_menu(app);
                         }
-                        "quit" => {
-                            let state = app.state::<ProxyProcess>();
-                            stop_proxy(&state.0);
-                            app.exit(0);
-                        }
-                        _ => {}
+                        return;
+                    }
+
+                    if id == "quit" {
+                        let process = app.state::<ProxyProcess>();
+                        stop_proxy(&process.0);
+                        app.exit(0);
                     }
                 })
-                .on_tray_icon_event(|tray, event| {
+                .on_tray_icon_event(|_tray, event| {
                     if let TrayIconEvent::Click {
                         button: MouseButton::Left,
                         button_state: MouseButtonState::Up,
                         ..
                     } = event
                     {
-                        let _ = tray.app_handle();
                         let _ = open::that("http://127.0.0.1:9000/admin/");
                     }
                 })
                 .build(app)?;
 
-            update_tray_menu(app.app_handle());
+            // Initial data fetch & menu
+            rebuild_tray_menu(app.app_handle());
 
             // Auto-start proxy
             let handle = app.app_handle().clone();
-            let child = start_proxy(&handle);
-            let state = app.state::<ProxyProcess>();
-            *state.0.lock().unwrap() = child;
+            let child = start_proxy_binary(&handle);
+            *app.state::<ProxyProcess>().0.lock().unwrap() = child;
 
-            // Update menu after startup
-            std::thread::sleep(std::time::Duration::from_millis(1000));
-            update_tray_menu(app.app_handle());
+            // Give proxy time to start, then refresh
+            std::thread::sleep(Duration::from_secs(2));
+
+            let data = app.state::<AppData>();
+            if let Some(config) = fetch_config() {
+                *data.providers.lock().unwrap() = config.providers;
+            }
+            *data.adapters.lock().unwrap() = fetch_adapters();
+            *data.log_level.lock().unwrap() = fetch_log_level();
+            rebuild_tray_menu(app.app_handle());
+
+            // Start background polling
+            start_polling(app.app_handle().clone());
 
             Ok(())
         })
